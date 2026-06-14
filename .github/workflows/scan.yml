@@ -1,0 +1,31 @@
+name: ポケカ アービトラージスキャン
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # 毎時0分（UTC）= 日本時間 毎時9分
+  workflow_dispatch:        # 手動実行も可能
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python 3.12 セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: 依存ライブラリのインストール
+        run: pip install -r requirements.txt
+
+      - name: スキャン実行
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          HOT_THRESHOLD:       "0.50"
+          WARM_THRESHOLD:      "0.70"
+        run: python main.py

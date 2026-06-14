@@ -1,0 +1,12 @@
+# 環境変数ファイル（絶対にGitにコミットしないこと）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store

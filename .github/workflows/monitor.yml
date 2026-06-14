@@ -1,0 +1,38 @@
+name: ポケカ相場監視
+
+on:
+  # 1時間ごとに自動実行（UTC基準: 毎時0分）
+  schedule:
+    - cron: "0 * * * *"
+
+  # 手動実行も可能にする
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10  # 最大10分で強制終了
+
+    steps:
+      # ① リポジトリをチェックアウト
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      # ② Python環境をセットアップ
+      - name: Python 3.12 セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # ③ 依存ライブラリをインストール
+      - name: 依存ライブラリのインストール
+        run: pip install -r requirements.txt
+
+      # ④ 監視スクリプトを実行
+      #    Discord Webhook URLは GitHub Secrets から注入する
+      - name: 相場監視スクリプト実行
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ALERT_THRESHOLD: "0.20"
+        run: python monitor.py
