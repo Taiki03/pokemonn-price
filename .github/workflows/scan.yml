@@ -29,3 +29,5 @@ jobs:
           HOT_THRESHOLD:       "0.50"
           WARM_THRESHOLD:      "0.70"
         run: python main.py
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
