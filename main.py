@@ -1,19 +1,19 @@
 """
 ポケカ アービトラージスキャナー - メインスクリプト
 
-処理フロー:
-  cards.csv を読み込む
-    ↓
-  カードごとに:
-    1. カードラッシュから基準価格（買取・販売）を取得
-    2. メルカリから出品リストを取得
-    3. 閾値以下の価格の出品を検出
-    4. Discordに通知
+処理フロー（ダイナミックモード）:
+  1. カードラッシュから SAR/AR 全カードを一括取得
+  2. cards.csv の手動追加カードもマージ
+  3. カードごとに:
+     - メルカリで出品リストを取得
+     - 買取価格の50%以下のものを検出
+     - タイトル・説明文に傷あり等のキーワードがないか確認
+     - Discordに通知
 """
 import logging
 import sys
 import time
-from typing import Optional, Tuple
+from typing import Optional
 
 from config import (
     HOT_THRESHOLD,
@@ -22,7 +22,7 @@ from config import (
     load_cards,
 )
 from models import ArbitrageAlert, AlertLevel, MercariListing, ReferencePrice
-from scrapers.cardrush import fetch_reference_price
+from scrapers.cardrush import fetch_all_cards_bulk
 from scrapers.mercari import fetch_mercari_listings, fetch_item_description
 from notifiers.discord import send_alert
 
@@ -40,16 +40,14 @@ def evaluate_listing(
     ref: ReferencePrice,
 ) -> Optional[ArbitrageAlert]:
     """
-    1件の出品が HOT 閘値（買取価格の50%以下）に当てはまるか判定する。
+    1件の出品が HOT 閾値（買取価格の50%以下）に当てはまるか判定する。
     """
     base_price = ref.buy_price or ref.sell_price
     if not base_price:
         return None
 
-    # 割引率: 1.0 = 同額, 0.5 = 50%安
     discount = 1.0 - (listing.price / base_price)
 
-    # HOTのみを対象（買取価格の50%以下）
     if discount >= (1.0 - HOT_THRESHOLD):
         level = AlertLevel.HOT
     else:
@@ -67,49 +65,56 @@ def evaluate_listing(
     )
 
 
+def build_reference(card: dict) -> ReferencePrice:
+    """
+    カード情報（バルク取得 or CSV）から ReferencePrice を生成する。
+    バルク取得済みの場合は追加API不要。
+    """
+    return ReferencePrice(
+        card_name    = card["card_name"],
+        buy_price    = card.get("buy_price"),
+        sell_price   = None,
+        model_number = card.get("model_number", ""),
+        source_url   = (
+            f"https://cardrush.media/pokemon/buying_prices"
+            f"?name={card['cardrush_name']}"
+        ),
+    )
+
+
 def process_card(card: dict) -> int:
     """
     1枚のカードを処理し、送信したアラート数を返す。
     """
     card_name       = card["card_name"]
-    cardrush_name   = card["cardrush_name"]
-    cardrush_rarity = card.get("cardrush_rarity", "")
     mercari_keyword = card["mercari_keyword"]
 
-    logger.info(f"━━ [{card_name}] 処理開始 ━━")
+    logger.info(f"━━ [{card_name}] ¥{card.get('buy_price', '?'):,} ━━")
 
-    # ① 基準価格取得（カードラッシュ）
-    ref = fetch_reference_price(card_name, cardrush_name, cardrush_rarity)
-    if ref is None:
-        logger.warning(f"  [{card_name}] カードラッシュ価格取得失敗 → スキップ")
+    # ① 基準価格（バルク取得済みのデータを使用、追加API不要）
+    ref = build_reference(card)
+    if not ref.buy_price:
+        logger.warning(f"  [{card_name}] 買取価格不明 → スキップ")
         return 0
-
-    logger.info(
-        f"  基準価格: 買取=¥{ref.buy_price:,}" if ref.buy_price else "  基準価格: 買取=不明"
-    )
 
     # ② メルカリ出品取得
     listings = fetch_mercari_listings(card_name, mercari_keyword)
     if not listings:
-        logger.warning(f"  [{card_name}] メルカリ出品取得失敗 → スキップ")
         return 0
 
-    logger.info(f"  メルカリ出品: {len(listings)} 件取得")
-
-    # ③ アラート判定 & 通知
+    # ③ アラート判定 → ④ キーワードチェック → ⑤ 通知
     alert_count = 0
     for listing in listings:
         alert = evaluate_listing(listing, ref)
         if not alert:
             continue
 
-        # ④ タイトルの除外キーワードチェック（高速）
-        title_lower = listing.title.lower()
+        # タイトルチェック（高速）
         if any(kw in listing.title for kw in EXCLUSION_KEYWORDS):
             logger.info(f"  除外(タイトル): {listing.title[:40]}")
             continue
 
-        # ⑤ 説明文の除外キーワードチェック（追加APIリクエスト）
+        # 説明文チェック（追加APIリクエスト）
         item_id = listing.url.split("/")[-1]
         description = fetch_item_description(item_id)
         if description and any(kw in description for kw in EXCLUSION_KEYWORDS):
@@ -117,43 +122,61 @@ def process_card(card: dict) -> int:
             continue
 
         logger.info(
-            f"  {alert.alert_level.value}: ¥{listing.price:,} "
-            f"(推定利益 ¥{alert.profit_estimate:,})"
+            f"  🔴 ¥{listing.price:,} → 推定利益 ¥{alert.profit_estimate:,}"
         )
         send_alert(alert)
         alert_count += 1
-        time.sleep(1)  # Discord レート制限対策
+        time.sleep(1)
 
     return alert_count
 
 
-
 def main() -> None:
-    logger.info("=" * 50)
+    logger.info("=" * 55)
     logger.info("  ポケカ アービトラージスキャナー 起動")
-    logger.info("=" * 50)
+    logger.info("=" * 55)
 
-    # カードリスト読み込み
+    # ① カードラッシュから SAR/AR 全カードを一括取得
+    logger.info("📥 カードラッシュからカードリストを取得中...")
+    bulk_cards = fetch_all_cards_bulk()
+
+    # ② cards.csv の手動追加カードをマージ（重複は除外）
     try:
-        cards = load_cards()
-    except FileNotFoundError as e:
-        logger.error(str(e))
-        sys.exit(1)
+        csv_cards = load_cards()
+        # バルク取得済みのカード名と被らないものだけ追加
+        bulk_names = {c["card_name"] for c in bulk_cards}
+        extra_cards = []
+        for c in csv_cards:
+            if c["card_name"] not in bulk_names:
+                # CSV形式のカードも buy_price を取得する必要あり
+                from scrapers.cardrush import fetch_reference_price
+                ref = fetch_reference_price(
+                    c["card_name"], c["cardrush_name"], c.get("cardrush_rarity", "")
+                )
+                if ref and ref.buy_price:
+                    c["buy_price"]    = ref.buy_price
+                    c["model_number"] = ref.model_number
+                    extra_cards.append(c)
+        if extra_cards:
+            logger.info(f"📋 cards.csv から {len(extra_cards)} 件追加")
+    except FileNotFoundError:
+        extra_cards = []
 
-    logger.info(f"監視対象: {len(cards)} 枚")
+    all_cards = bulk_cards + extra_cards
+    logger.info(f"📊 スキャン対象: 合計 {len(all_cards)} 件")
+    logger.info("=" * 55)
 
+    # ③ 各カードをスキャン
     total_alerts = 0
-    for i, card in enumerate(cards):
+    for i, card in enumerate(all_cards, 1):
+        logger.info(f"[{i}/{len(all_cards)}]")
         alerts = process_card(card)
         total_alerts += alerts
+        time.sleep(SLEEP_BETWEEN_CARDS)
 
-        # 最後のカード以外はウェイト
-        if i < len(cards) - 1:
-            time.sleep(SLEEP_BETWEEN_CARDS)
-
-    logger.info("=" * 50)
+    logger.info("=" * 55)
     logger.info(f"  完了: アラート送信数 = {total_alerts}")
-    logger.info("=" * 50)
+    logger.info("=" * 55)
 
 
 if __name__ == "__main__":

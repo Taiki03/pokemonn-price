@@ -20,9 +20,13 @@ HOT_THRESHOLD:  float = float(os.getenv("HOT_THRESHOLD",  "0.50"))
 WARM_THRESHOLD: float = float(os.getenv("WARM_THRESHOLD", "0.70"))
 
 # ─── スクレイピング設定 ─────────────────────────────
-REQUEST_TIMEOUT:    int = 15   # 秒
-SLEEP_BETWEEN_CARDS: int = 3   # カード間のウェイト（秒）
-MERCARI_MAX_ITEMS:  int = 30   # メルカリから取得する最大件数
+REQUEST_TIMEOUT:     int = 15  # 秒
+SLEEP_BETWEEN_CARDS: int = 2   # カード間のウェイト（秒）
+MERCARI_MAX_ITEMS:   int = 30  # メルカリから取得する最大件数
+
+# ─── ダイナミックスキャン設定 ─────────────────────────
+TARGET_RARITIES: list = ['SAR', 'AR']  # 対象レアリティ
+MIN_BUY_PRICE:   int  = 3000           # 最低買取価格（円）
 
 # ─── 除外キーワード（タイトル・説明文に含まれていたらスキップ）──
 # 買取価格が下がる状態異常のカードを除外する

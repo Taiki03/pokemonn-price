@@ -10,13 +10,14 @@ cardrush.media の買取表ページに埋め込まれた __NEXT_DATA__ JSON か
 import json
 import logging
 import re
+import time
 import urllib.parse
 from typing import Optional
 
 import requests
 
 from models import ReferencePrice
-from config import REQUEST_TIMEOUT
+from config import REQUEST_TIMEOUT, TARGET_RARITIES, MIN_BUY_PRICE
 
 logger = logging.getLogger(__name__)
 
@@ -201,3 +202,142 @@ def fetch_reference_price(card_name: str, name: str, rarity: str = "") -> Option
         ),
     )
 
+
+# ──────────────────────────────────────────────────────────
+# ダイナミックスキャン用：全カード一括取得
+# ──────────────────────────────────────────────────────────
+
+def fetch_all_cards_bulk(
+    rarities: list = None,
+    min_price: int = None,
+) -> list:
+    """
+    カードラッシュから対象レアリティの全カードを一括取得する。
+
+    同名・同レアリティが複数ある場合は最高買取価格のエントリを採用。
+
+    Args:
+        rarities:  対象レアリティリスト（デフォルト: config.TARGET_RARITIES）
+        min_price: 最低買取価格（デフォルト: config.MIN_BUY_PRICE）
+
+    Returns:
+        [{'card_name', 'cardrush_name', 'cardrush_rarity',
+          'model_number', 'buy_price', 'mercari_keyword'}, ...]
+    """
+    if rarities is None:
+        rarities = TARGET_RARITIES
+    if min_price is None:
+        min_price = MIN_BUY_PRICE
+
+    rarities_set = {r.upper() for r in rarities}
+
+    # (name, rarity) → 最高買取価格エントリ
+    seen: dict = {}
+    page = 1
+    consecutive_failures = 0
+    MAX_FAILURES = 3
+
+    while consecutive_failures < MAX_FAILURES:
+        items = _fetch_cardrush_page(page)
+
+        if items is None:
+            # タイムアウト等のエラー → リトライカウント
+            consecutive_failures += 1
+            logger.warning(f"[CardRush] ページ{page} 取得失敗 ({consecutive_failures}/{MAX_FAILURES})")
+            time.sleep(3)
+            continue
+
+        if not items:
+            # 空ページ = データ終端
+            break
+
+        consecutive_failures = 0  # 成功したらリセット
+        stop = False
+        for item in items:
+            amount = item.get("amount", 0)
+            rarity = item.get("rarity", "").upper()
+            name   = item.get("name", "")
+
+            if amount < min_price:
+                stop = True
+                continue
+
+            if rarity not in rarities_set:
+                continue
+
+            key = (name, rarity)
+            if key not in seen or seen[key]["amount"] < amount:
+                seen[key] = item
+
+        if stop:
+            break
+
+        page += 1
+        time.sleep(0.5)
+
+
+    # カードリストを構築
+    cards = []
+    for (name, rarity), item in seen.items():
+        model_number = item.get("model_number", "")
+        cards.append({
+            "card_name":       f"{name} {rarity}",
+            "cardrush_name":   name,
+            "cardrush_rarity": rarity,
+            "model_number":    model_number,
+            "buy_price":       item["amount"],
+            "mercari_keyword": f"{name} {rarity}",
+        })
+
+    # 買取価格の高い順にソート
+    cards.sort(key=lambda x: -x["buy_price"])
+
+    logger.info(
+        f"[CardRush] バルク取得完了: {len(cards)} 件 "
+        f"(レアリティ:{rarities}, 最低¥{min_price:,})"
+    )
+    return cards
+
+
+def _fetch_cardrush_page(page: int) -> Optional[list]:
+    """
+    カードラッシュの指定ページの買取価格リストを返す。
+
+    Returns:
+        list: 取得成功時
+        []: 空ページ（データ終端）
+        None: タイムアウト・エラー時
+    """
+    parts = [
+        ("limit",              "100"),
+        ("page",               str(page)),
+        ("sort[key]",          "amount"),
+        ("sort[order]",        "desc"),
+        ("display_category[]", "最新弾"),
+        ("display_category[]", "スタンダード"),
+        ("display_category[]", "エクストラ"),
+        ("display_category[]", "旧裏"),
+        ("is_hot[]",           "true"),
+        ("is_hot[]",           "false"),
+    ]
+    url = BASE_URL + "?" + urllib.parse.urlencode(parts)
+
+    for attempt in range(1, 4):  # 最大3回リトライ
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            next_data = _extract_next_data(resp.text)
+            if not next_data:
+                return []
+            return (
+                next_data
+                .get("props", {})
+                .get("pageProps", {})
+                .get("buyingPrices", [])
+            )
+        except requests.RequestException as e:
+            logger.warning(f"[CardRush] ページ{page} 試行{attempt}/3: {e}")
+            if attempt < 3:
+                time.sleep(attempt * 2)
+
+    return None  # 3回失敗
