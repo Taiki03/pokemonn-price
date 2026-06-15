@@ -11,6 +11,7 @@
      - Discordに通知
 """
 import logging
+import re
 import sys
 import time
 from typing import Optional
@@ -88,6 +89,9 @@ def process_card(card: dict) -> int:
     """
     card_name       = card["card_name"]
     mercari_keyword = card["mercari_keyword"]
+    cardrush_name   = card["cardrush_name"]
+    target_rarity   = card.get("cardrush_rarity", "").upper()
+    model_number    = card.get("model_number", "")
 
     logger.info(f"━━ [{card_name}] ¥{card.get('buy_price', '?'):,} ━━")
 
@@ -102,24 +106,77 @@ def process_card(card: dict) -> int:
     if not listings:
         return 0
 
-    # ③ アラート判定 → ④ キーワードチェック → ⑤ 通知
+    # ③ アラート判定 → ④ 厳密なカード判定 → ⑤ 通知
     alert_count = 0
     for listing in listings:
         alert = evaluate_listing(listing, ref)
         if not alert:
             continue
 
-        # タイトルチェック（高速）
+        title_lower = listing.title.lower()
+
+        # ── 1. タイトルの除外キーワードチェック（傷あり、折れなど） ──
         if any(kw in listing.title for kw in EXCLUSION_KEYWORDS):
-            logger.info(f"  除外(タイトル): {listing.title[:40]}")
+            logger.info(f"  除外(タイトル傷): {listing.title[:40]}")
             continue
 
-        # 説明文チェック（追加APIリクエスト）
-        item_id = listing.url.split("/")[-1]
-        description = fetch_item_description(item_id)
-        if description and any(kw in description for kw in EXCLUSION_KEYWORDS):
-            logger.info(f"  除外(説明文): {listing.title[:40]}")
+        # ── 2. カード名チェック ──
+        # メルカリの曖昧検索対策。カード名（exを除く主要部分）が含まれているか
+        name_clean = cardrush_name.lower().replace("ex", "").strip()
+        if name_clean not in title_lower:
+            logger.info(f"  除外(カード名不一致): {listing.title[:40]} (検索: {cardrush_name})")
             continue
+
+        # ── 3. レアリティ不一致チェック ──
+        # 対象が SAR で、タイトルに RR, SR, UR, HR, R, U, C など別のレアリティのみが書かれており、
+        # かつ SAR という文字が一切ない場合は除外
+        all_rarities = ["SAR", "AR", "SR", "UR", "HR", "RR", "TR", "CHR", "CSR"]
+        other_rarities = [r for r in all_rarities if r != target_rarity]
+        has_target_rarity = target_rarity.lower() in title_lower
+        has_other_rarity = any(f" {r.lower()} " in f" {title_lower} " or r.lower() in title_lower for r in other_rarities)
+        if target_rarity and not has_target_rarity and has_other_rarity:
+            logger.info(f"  除外(レアリティ不一致): {listing.title[:40]} (Target: {target_rarity})")
+            continue
+
+        # ── 4. 型番チェック ──
+        if model_number:
+            nums = re.findall(r"\d+", model_number)
+            if nums:
+                # nums=['201', '165'] -> r"201[\s\-/]*165"
+                pattern = r"[\s\-/]*".join(nums)
+                
+                # ① まずタイトルでチェック
+                if re.search(pattern, title_lower):
+                    # タイトルに含まれていれば型番チェック通過
+                    pass
+                else:
+                    # ② タイトルになければ説明文を取得してチェック
+                    item_id = listing.url.split("/")[-1]
+                    description = fetch_item_description(item_id).lower()
+                    
+                    # 説明文に傷ありキーワードがあれば除外
+                    if description and any(kw in description for kw in EXCLUSION_KEYWORDS):
+                        logger.info(f"  除外(説明文傷): {listing.title[:40]}")
+                        continue
+                        
+                    # 型番チェック
+                    if not description or not re.search(pattern, description):
+                        logger.info(f"  除外(型番不一致): {listing.title[:40]} (型番: {model_number})")
+                        continue
+            else:
+                # 型番がない場合は、説明文の傷キーワードチェックだけ行う
+                item_id = listing.url.split("/")[-1]
+                description = fetch_item_description(item_id).lower()
+                if description and any(kw in description for kw in EXCLUSION_KEYWORDS):
+                    logger.info(f"  除外(説明文傷): {listing.title[:40]}")
+                    continue
+        else:
+            # 型番がない場合は、説明文の傷キーワードチェックだけ行う
+            item_id = listing.url.split("/")[-1]
+            description = fetch_item_description(item_id).lower()
+            if description and any(kw in description for kw in EXCLUSION_KEYWORDS):
+                logger.info(f"  除外(説明文傷): {listing.title[:40]}")
+                continue
 
         logger.info(
             f"  🔴 ¥{listing.price:,} → 推定利益 ¥{alert.profit_estimate:,}"
