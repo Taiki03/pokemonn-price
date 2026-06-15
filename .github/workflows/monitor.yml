@@ -2,8 +2,8 @@ name: ポケカ相場監視
 
 on:
   # 1時間ごとに自動実行（UTC基準: 毎時0分）
-  schedule:
-    - cron: "0 * * * *"
+  # schedule:
+  #   - cron: "0 * * * *"
 
   # 手動実行も可能にする
   workflow_dispatch:
