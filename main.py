@@ -17,13 +17,13 @@ from typing import Optional, Tuple
 
 from config import (
     HOT_THRESHOLD,
-    WARM_THRESHOLD,
     SLEEP_BETWEEN_CARDS,
+    EXCLUSION_KEYWORDS,
     load_cards,
 )
 from models import ArbitrageAlert, AlertLevel, MercariListing, ReferencePrice
 from scrapers.cardrush import fetch_reference_price
-from scrapers.mercari import fetch_mercari_listings
+from scrapers.mercari import fetch_mercari_listings, fetch_item_description
 from notifiers.discord import send_alert
 
 # ─── ログ設定 ──────────────────────────────────────────
@@ -40,9 +40,7 @@ def evaluate_listing(
     ref: ReferencePrice,
 ) -> Optional[ArbitrageAlert]:
     """
-    1件の出品が HOT/WARM 閾値に当てはまるか判定する。
-
-    基準価格には買取価格を優先し、なければ販売価格を使用。
+    1件の出品が HOT 閘値（買取価格の50%以下）に当てはまるか判定する。
     """
     base_price = ref.buy_price or ref.sell_price
     if not base_price:
@@ -51,14 +49,13 @@ def evaluate_listing(
     # 割引率: 1.0 = 同額, 0.5 = 50%安
     discount = 1.0 - (listing.price / base_price)
 
-    if discount >= (1.0 - HOT_THRESHOLD):    # 買取価格の50%以下
+    # HOTのみを対象（買取価格の50%以下）
+    if discount >= (1.0 - HOT_THRESHOLD):
         level = AlertLevel.HOT
-    elif discount >= (1.0 - WARM_THRESHOLD):  # 買取価格の70%以下
-        level = AlertLevel.WARM
     else:
         return None
 
-    profit = base_price - listing.price  # 粗利（送料等未考慮）
+    profit = base_price - listing.price
 
     return ArbitrageAlert(
         card_name       = ref.card_name,
@@ -103,14 +100,29 @@ def process_card(card: dict) -> int:
     alert_count = 0
     for listing in listings:
         alert = evaluate_listing(listing, ref)
-        if alert:
-            logger.info(
-                f"  {alert.alert_level.value}: ¥{listing.price:,} "
-                f"(推定利益 ¥{alert.profit_estimate:,})"
-            )
-            send_alert(alert)
-            alert_count += 1
-            time.sleep(1)  # Discord レート制限対策
+        if not alert:
+            continue
+
+        # ④ タイトルの除外キーワードチェック（高速）
+        title_lower = listing.title.lower()
+        if any(kw in listing.title for kw in EXCLUSION_KEYWORDS):
+            logger.info(f"  除外(タイトル): {listing.title[:40]}")
+            continue
+
+        # ⑤ 説明文の除外キーワードチェック（追加APIリクエスト）
+        item_id = listing.url.split("/")[-1]
+        description = fetch_item_description(item_id)
+        if description and any(kw in description for kw in EXCLUSION_KEYWORDS):
+            logger.info(f"  除外(説明文): {listing.title[:40]}")
+            continue
+
+        logger.info(
+            f"  {alert.alert_level.value}: ¥{listing.price:,} "
+            f"(推定利益 ¥{alert.profit_estimate:,})"
+        )
+        send_alert(alert)
+        alert_count += 1
+        time.sleep(1)  # Discord レート制限対策
 
     return alert_count
 

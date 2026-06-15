@@ -1,6 +1,7 @@
 """
 共通データモデル
 """
+import datetime
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -28,6 +29,7 @@ class MercariListing:
     price:     int
     url:       str
     thumbnail: str = ""
+    created:   Optional[datetime.datetime] = None  # 出品日時
 
 
 @dataclass
